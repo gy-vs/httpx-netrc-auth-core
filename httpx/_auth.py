@@ -1,9 +1,12 @@
 import hashlib
+import netrc
 import os
 import re
+import stat
 import time
 import typing
 from base64 import b64encode
+from pathlib import Path
 from urllib.request import parse_http_list
 
 from ._exceptions import ProtocolError
@@ -316,3 +319,131 @@ class _DigestAuthChallenge(typing.NamedTuple):
     algorithm: str
     opaque: typing.Optional[bytes]
     qop: typing.Optional[bytes]
+
+
+def _build_basic_auth_header(
+    username: typing.Union[str, bytes], password: typing.Union[str, bytes]
+) -> str:
+    userpass = b":".join((to_bytes(username), to_bytes(password)))
+    token = b64encode(userpass).decode()
+    return f"Basic {token}"
+
+
+def _check_netrc_file_permissions(path: str) -> None:
+    """
+    Raise a `NetrcParseError` if a netrc file has insecure permissions.
+
+    Python's `netrc` module only applies these checks to the default netrc
+    file. We apply them to explicit netrc files too, so that insecure
+    permissions remain a distinguishable failure case.
+    """
+    if os.name == "posix":
+        file_stat = os.stat(path)
+
+        if file_stat.st_uid != os.getuid():
+            raise netrc.NetrcParseError(
+                f"netrc file {path!r} owner ({file_stat.st_uid}) does not "
+                f"match the current user ({os.getuid()}).",
+                path,
+            )
+
+        if file_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise netrc.NetrcParseError(
+                f"netrc file {path!r} has insecure permissions, and must not "
+                "be accessible by other users.",
+                path,
+            )
+
+
+def _parse_netrc_file(path: str) -> netrc.netrc:
+    """
+    Parse a netrc file.
+
+    Raises `FileNotFoundError` if the file does not exist, and
+    `netrc.NetrcParseError` if the file is malformed or has insecure
+    permissions, so that the different failure cases remain distinguishable.
+    """
+    _check_netrc_file_permissions(path)
+    return netrc.netrc(path)
+
+
+def _load_default_netrc() -> typing.Optional[netrc.netrc]:
+    """
+    Load the netrc file from the default locations, returning `None` if
+    no netrc file exists.
+
+    The default locations are the file given by the `NETRC` environment
+    variable if set, or else `~/.netrc` or `~/_netrc`.
+    """
+    candidates = [os.getenv("NETRC", ""), "~/.netrc", "~/_netrc"]
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.is_file():
+            return _parse_netrc_file(str(path))
+    return None
+
+
+class NetRCAuth(Auth):
+    """
+    Use a 'netrc' file to lookup basic auth credentials based on the url host.
+
+    If no `file` is given, then the default netrc file locations are used,
+    which is the file given by the `NETRC` environment variable if set, or
+    else `~/.netrc` or `~/_netrc`. The default locations are loaded lazily,
+    and are subject to the client's `trust_env` setting.
+
+    An explicit `file` is always used, regardless of `trust_env`, and is
+    parsed eagerly, so that a missing file, insecure permissions, or a
+    malformed file raise immediately.
+
+    Usage: `httpx.Client(auth=httpx.NetRCAuth())`
+    """
+
+    def __init__(self, file: typing.Optional[str] = None) -> None:
+        self._file = file
+        self._netrc_info: typing.Optional[netrc.netrc] = None
+        self._default_file_loaded = False
+        if file is not None:
+            self._netrc_info = _parse_netrc_file(file)
+
+    @property
+    def uses_default_file(self) -> bool:
+        """
+        Return `True` if credentials are looked up from the default netrc
+        file locations, rather than from an explicit netrc file.
+        """
+        return self._file is None
+
+    def _get_netrc_info(self) -> typing.Optional[netrc.netrc]:
+        if self._file is not None:
+            return self._netrc_info
+        if not self._default_file_loaded:
+            # The default netrc file locations are loaded lazily, so that
+            # clients with `trust_env=False` never read them, and so that
+            # a missing default netrc file is not an error.
+            self._default_file_loaded = True
+            self._netrc_info = _load_default_netrc()
+        return self._netrc_info
+
+    def auth_flow(self, request: Request) -> typing.Generator[Request, Response, None]:
+        netrc_info = self._get_netrc_info()
+        auth_info = (
+            netrc_info.authenticators(request.url.host)
+            if netrc_info is not None
+            else None
+        )
+        if auth_info is None or not auth_info[2]:
+            # The netrc file did not have authentication credentials for this host.
+            yield request
+        else:
+            # Build a basic auth header with credentials from the netrc file.
+            request.headers["Authorization"] = _build_basic_auth_header(
+                username=auth_info[0], password=auth_info[2]
+            )
+            yield request
+
+    def __repr__(self) -> str:
+        # The netrc file contents are credentials, so the repr only ever
+        # includes the file location, never any login or password.
+        file = self._file if self._file is not None else "<default>"
+        return f"{self.__class__.__name__}(file={file!r})"

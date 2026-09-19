@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Added
+
+* Add `httpx.NetRCAuth()`, supporting basic auth credentials looked up from a netrc file, either from an explicit file path or from the default netrc file locations. The default locations are subject to the client's `trust_env` setting, while an explicit file is always used.
+
 ## 0.23.3 (4th Jan, 2023)
 
 ### Fixed

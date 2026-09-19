@@ -459,6 +459,20 @@ password example-password
 ...
 ```
 
+You can also use `httpx.NetRCAuth()` to explicitly use netrc authentication,
+either on the client or on individual requests...
+
+```pycon
+>>> # Use the default netrc file locations.
+>>> client = httpx.Client(auth=httpx.NetRCAuth())
+>>> # Use an explicit netrc file.
+>>> client = httpx.Client(auth=httpx.NetRCAuth(file="my_default_folder/.my_netrc"))
+```
+
+When using the default netrc file locations, the netrc file is only loaded
+if `trust_env=True`. An explicit netrc file is always used, regardless of
+`trust_env`.
+
 When using `Client` instances, `trust_env` should be set on the client itself, rather than on the request methods:
 
 ```python
@@ -829,6 +843,7 @@ When issuing requests or instantiating a client, the `auth` argument can be used
 
 * A two-tuple of `username`/`password`, to be used with basic authentication.
 * An instance of `httpx.BasicAuth()` or `httpx.DigestAuth()`.
+* An instance of `httpx.NetRCAuth()`, to be used with basic authentication from a netrc file.
 * A callable, accepting a request and returning an authenticated request instance.
 * An instance of subclasses of `httpx.Auth`.
 

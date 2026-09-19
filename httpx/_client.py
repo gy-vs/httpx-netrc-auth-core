@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, contextmanager
 from types import TracebackType
 
 from .__version__ import __version__
-from ._auth import Auth, BasicAuth, FunctionAuth
+from ._auth import Auth, BasicAuth, FunctionAuth, NetRCAuth
 from ._config import (
     DEFAULT_LIMITS,
     DEFAULT_MAX_REDIRECTS,
@@ -450,6 +450,16 @@ class BaseClient:
         )
 
         if auth is not None:
+            if (
+                isinstance(auth, NetRCAuth)
+                and auth.uses_default_file
+                and not self.trust_env
+            ):
+                # A `NetRCAuth` instance using the default netrc file
+                # locations is environment-based configuration, and so is
+                # disabled by `trust_env=False`. Instances with an explicit
+                # netrc file are always used.
+                return Auth()
             return auth
 
         username, password = request.url.username, request.url.password
