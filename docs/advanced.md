@@ -465,6 +465,23 @@ When using `Client` instances, `trust_env` should be set on the client itself, r
 client = httpx.Client(trust_env=False)
 ```
 
+You can also use `httpx.NetRCAuth()` to explicitly authenticate requests
+from a netrc file, either at the client level or per-request:
+
+```pycon
+>>> auth = httpx.NetRCAuth()  # Use the default netrc file locations.
+>>> client = httpx.Client(auth=auth)
+```
+
+Using the default netrc file locations requires `trust_env=True`.
+Passing an explicit `file=...` applies the authentication regardless of
+the `trust_env` setting:
+
+```pycon
+>>> auth = httpx.NetRCAuth(file="my_default_folder/.my_netrc")
+>>> client = httpx.Client(auth=auth, trust_env=False)
+```
+
 ## HTTP Proxying
 
 HTTPX supports setting up [HTTP proxies](https://en.wikipedia.org/wiki/Proxy_server#Web_proxy_servers) via the `proxies` parameter to be passed on client initialization or top-level API functions like `httpx.get(..., proxies=...)`.
@@ -829,6 +846,7 @@ When issuing requests or instantiating a client, the `auth` argument can be used
 
 * A two-tuple of `username`/`password`, to be used with basic authentication.
 * An instance of `httpx.BasicAuth()` or `httpx.DigestAuth()`.
+* An instance of `httpx.NetRCAuth()`, to use credentials from a netrc file.
 * A callable, accepting a request and returning an authenticated request instance.
 * An instance of subclasses of `httpx.Auth`.
 

@@ -1,9 +1,12 @@
 import hashlib
+import netrc
 import os
 import re
+import stat
 import time
 import typing
 from base64 import b64encode
+from pathlib import Path
 from urllib.request import parse_http_list
 
 from ._exceptions import ProtocolError
@@ -139,6 +142,99 @@ class BasicAuth(Auth):
         userpass = b":".join((to_bytes(username), to_bytes(password)))
         token = b64encode(userpass).decode()
         return f"Basic {token}"
+
+
+class NetRCAuth(Auth):
+    """
+    Use a 'netrc' file to provide basic authentication credentials,
+    selected by the hostname of the request.
+
+    By default the user's netrc file is used, as given by the `NETRC`
+    environment variable, or at `~/.netrc` or `~/_netrc`. In this case the
+    authentication is only applied if the client is using `trust_env=True`.
+
+    An explicit `file=...` may also be included, to use a specific netrc
+    file. In this case the authentication is always applied, regardless of
+    the `trust_env` setting.
+
+    Usage: `httpx.get(..., auth=httpx.NetRCAuth())`
+    """
+
+    def __init__(self, file: typing.Optional[str] = None) -> None:
+        self._file = file
+        self._netrc_info: typing.Optional[netrc.netrc] = None
+        self._netrc_loaded = False
+
+    @property
+    def uses_default_file(self) -> bool:
+        """
+        Return `True` if the default netrc file locations are being used,
+        rather than an explicit `file=...` argument.
+        """
+        return self._file is None
+
+    def _load_netrc_info(self) -> typing.Optional[netrc.netrc]:
+        if not self._netrc_loaded:
+            self._netrc_loaded = True
+            netrc_file = self._resolve_netrc_file()
+            if netrc_file is not None:
+                self._check_permissions(netrc_file)
+                self._netrc_info = netrc.netrc(str(netrc_file))
+        return self._netrc_info
+
+    def _resolve_netrc_file(self) -> typing.Optional[Path]:
+        if self._file is not None:
+            netrc_file = Path(self._file).expanduser()
+            if not netrc_file.is_file():
+                raise FileNotFoundError(f"No such netrc file: {str(netrc_file)!r}")
+            return netrc_file
+
+        for candidate in (os.getenv("NETRC", ""), "~/.netrc", "~/_netrc"):
+            netrc_file = Path(candidate).expanduser()
+            if netrc_file.is_file():
+                return netrc_file
+        return None
+
+    def _check_permissions(self, netrc_file: Path) -> None:
+        if os.name != "posix":  # pragma: no cover
+            return
+
+        file_stat = netrc_file.stat()
+        if file_stat.st_uid != os.getuid():
+            raise netrc.NetrcParseError(
+                f"netrc file {str(netrc_file)!r} is not owned by the current user."
+            )
+        if file_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise netrc.NetrcParseError(
+                f"netrc file {str(netrc_file)!r} has too permissive"
+                " access permissions. Access should be restricted"
+                " to the current user only."
+            )
+
+    def _get_credentials(self, host: str) -> typing.Optional[typing.Tuple[str, str]]:
+        netrc_info = self._load_netrc_info()
+        if netrc_info is None:
+            return None
+
+        auth_info = netrc_info.authenticators(host)
+        if auth_info is None or auth_info[2] is None:
+            return None
+        return (auth_info[0], auth_info[2])
+
+    def auth_flow(self, request: Request) -> typing.Generator[Request, Response, None]:
+        credentials = self._get_credentials(request.url.host)
+        if credentials is not None:
+            basic_auth = BasicAuth(username=credentials[0], password=credentials[1])
+            yield from basic_auth.auth_flow(request)
+        else:
+            yield request
+
+    def __repr__(self) -> str:
+        # The contents of the netrc file are never included here,
+        # so that credentials cannot leak into logs or tracebacks.
+        if self._file is not None:
+            return f"NetRCAuth(file={self._file!r})"
+        return "NetRCAuth()"
 
 
 class DigestAuth(Auth):

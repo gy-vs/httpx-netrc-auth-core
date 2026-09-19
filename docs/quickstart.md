@@ -480,6 +480,18 @@ as above:
 <Response [200 OK]>
 ```
 
+To provide credentials from a `.netrc` file, use a `NetRCAuth` instance.
+The credentials to use are selected by the hostname of the request:
+
+```pycon
+>>> auth = httpx.NetRCAuth()  # Use the default netrc file locations.
+>>> httpx.get("https://example.com", auth=auth)
+<Response [200 OK]>
+>>> auth = httpx.NetRCAuth(file="/path/to/.netrc")  # Use an explicit file.
+>>> httpx.get("https://example.com", auth=auth)
+<Response [200 OK]>
+```
+
 ## Exceptions
 
 HTTPX will raise exceptions if an error occurs.

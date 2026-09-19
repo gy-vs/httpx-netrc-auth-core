@@ -17,6 +17,14 @@ import httpx
 from ..common import FIXTURES_DIR
 
 
+def write_netrc_file(tmp_path: typing.Any, content: str) -> str:
+    netrc_file = tmp_path / "netrc"
+    netrc_file.write_text(content)
+    # The netrc file must only be accessible to the current user.
+    netrc_file.chmod(0o600)
+    return str(netrc_file)
+
+
 class App:
     def __init__(self, auth_header: str = "", status_code: int = 200) -> None:
         self.auth_header = auth_header
@@ -75,6 +83,17 @@ class DigestApp:
             "www-authenticate": f'Digest realm="httpx@example.org", {challenge_str}',
         }
         return httpx.Response(401, headers=headers)
+
+
+class RedirectApp:
+    def __init__(self, location: str) -> None:
+        self.location = location
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/redirect":
+            return httpx.Response(303, headers={"Location": self.location})
+        data = {"auth": request.headers.get("Authorization")}
+        return httpx.Response(200, json=data)
 
 
 class RepeatAuth(httpx.Auth):
@@ -278,6 +297,236 @@ async def test_trust_env_auth() -> None:
     assert response.json() == {
         "auth": "Basic ZXhhbXBsZS11c2VybmFtZTpleGFtcGxlLXBhc3N3b3Jk"
     }
+
+
+def test_sync_client_netrc_auth(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    url = "http://example.org/"
+    app = App()
+
+    with httpx.Client(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(file=netrc_file)
+    ) as client:
+        response = client.get(url)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "auth": "Basic ZXhhbXBsZS11c2VybmFtZTpleGFtcGxlLXBhc3N3b3Jk"
+    }
+
+
+@pytest.mark.anyio
+async def test_async_client_netrc_auth(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    url = "http://example.org/"
+    app = App()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(file=netrc_file)
+    ) as client:
+        response = await client.get(url)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "auth": "Basic ZXhhbXBsZS11c2VybmFtZTpleGFtcGxlLXBhc3N3b3Jk"
+    }
+
+
+@pytest.mark.anyio
+async def test_netrc_auth_default_file_respects_trust_env(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path, "machine example.org\nlogin env-user\npassword env-pass\n"
+    )
+    os.environ["NETRC"] = netrc_file
+    url = "http://example.org/"
+    app = App()
+
+    # A `NetRCAuth` using the default netrc file locations is
+    # disabled by `trust_env=False`...
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(), trust_env=False
+    ) as client:
+        response = await client.get(url)
+
+    assert response.status_code == 200
+    assert response.json() == {"auth": None}
+
+    # ...and is applied with `trust_env=True`.
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(), trust_env=True
+    ) as client:
+        response = await client.get(url)
+
+    assert response.status_code == 200
+    assert response.json() == {"auth": "Basic ZW52LXVzZXI6ZW52LXBhc3M="}
+
+
+@pytest.mark.anyio
+async def test_netrc_auth_explicit_file_ignores_trust_env(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    url = "http://example.org/"
+    app = App()
+
+    # A `NetRCAuth` using an explicit netrc file is
+    # applied regardless of `trust_env`.
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app),
+        auth=httpx.NetRCAuth(file=netrc_file),
+        trust_env=False,
+    ) as client:
+        response = await client.get(url)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "auth": "Basic ZXhhbXBsZS11c2VybmFtZTpleGFtcGxlLXBhc3N3b3Jk"
+    }
+
+
+@pytest.mark.anyio
+async def test_netrc_auth_request_level_override(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    url = "http://example.org/"
+    app = App()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app),
+        auth=httpx.NetRCAuth(file=netrc_file),
+        trust_env=False,
+    ) as client:
+        # An explicit request-level `auth=...` takes priority
+        # over the client-level `NetRCAuth`.
+        response = await client.get(url, auth=("override-user", "override-pass"))
+
+        assert response.status_code == 200
+        assert response.json() == {"auth": "Basic b3ZlcnJpZGUtdXNlcjpvdmVycmlkZS1wYXNz"}
+
+        # Using `auth=None` disables authentication for the request.
+        response = await client.get(url, auth=None)
+
+        assert response.status_code == 200
+        assert response.json() == {"auth": None}
+
+
+@pytest.mark.anyio
+async def test_netrc_auth_no_matching_entry(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine other.org\nlogin example-username\npassword example-password\n",
+    )
+    url = "http://example.org/"
+    app = App()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(file=netrc_file)
+    ) as client:
+        response = await client.get(url)
+
+    assert response.status_code == 200
+    assert response.json() == {"auth": None}
+
+
+def test_sync_netrc_auth_redirect_same_origin(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    app = RedirectApp(location="/target")
+
+    with httpx.Client(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(file=netrc_file)
+    ) as client:
+        response = client.get("http://example.org/redirect", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "auth": "Basic ZXhhbXBsZS11c2VybmFtZTpleGFtcGxlLXBhc3N3b3Jk"
+    }
+
+
+@pytest.mark.anyio
+async def test_async_netrc_auth_redirect_same_origin(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    app = RedirectApp(location="/target")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(file=netrc_file)
+    ) as client:
+        response = await client.get(
+            "http://example.org/redirect", follow_redirects=True
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "auth": "Basic ZXhhbXBsZS11c2VybmFtZTpleGFtcGxlLXBhc3N3b3Jk"
+    }
+
+
+def test_sync_netrc_auth_redirect_cross_origin(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    app = RedirectApp(location="http://other.org/target")
+
+    with httpx.Client(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(file=netrc_file)
+    ) as client:
+        response = client.get("http://example.org/redirect", follow_redirects=True)
+
+    # The 'Authorization' header is not leaked to the cross-origin host.
+    assert response.status_code == 200
+    assert response.json() == {"auth": None}
+
+
+@pytest.mark.anyio
+async def test_async_netrc_auth_redirect_cross_origin(tmp_path: typing.Any) -> None:
+    netrc_file = write_netrc_file(
+        tmp_path,
+        "machine example.org\n"
+        "login example-username\n"
+        "password example-password\n",
+    )
+    app = RedirectApp(location="http://other.org/target")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(app), auth=httpx.NetRCAuth(file=netrc_file)
+    ) as client:
+        response = await client.get(
+            "http://example.org/redirect", follow_redirects=True
+        )
+
+    # The 'Authorization' header is not leaked to the cross-origin host.
+    assert response.status_code == 200
+    assert response.json() == {"auth": None}
 
 
 @pytest.mark.anyio

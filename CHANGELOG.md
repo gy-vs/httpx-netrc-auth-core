@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Added
+
+* Added `httpx.NetRCAuth()`, providing basic authentication credentials from a netrc file, selected by the hostname of the request. The default netrc file locations are used when `trust_env` is enabled, or an explicit `file=...` may be given, which is applied regardless of the `trust_env` setting.
+
 ## 0.23.3 (4th Jan, 2023)
 
 ### Fixed
